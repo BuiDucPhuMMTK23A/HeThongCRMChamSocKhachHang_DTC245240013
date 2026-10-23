@@ -1,0 +1,146 @@
+version: '3.8'
+
+networks:
+  frontend-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+  monitoring-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  grafana_data:
+  prometheus_data:
+  loki_data:
+
+services:
+  # --- TẦNG ỨNG DỤNG ---
+  db:
+    image: postgres:15-alpine
+    container_name: crm_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend-net
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: crm_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    ports:
+      - "5050:80"
+    networks:
+      - backend-net
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  web:
+    build: ./app
+    container_name: crm_webapp
+    user: "1000:1000"
+    command: gunicorn --bind 0.0.0.0:8000 crm.wsgi:application
+    volumes:
+      - ./app:/app
+    environment:
+      - DB_HOST=db
+      - DB_NAME=${POSTGRES_DB}
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASS=${POSTGRES_PASSWORD}
+    depends_on:
+      - db
+    networks:
+      - frontend-net
+      - backend-net
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: crm_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./app/staticfiles:/app/staticfiles:ro
+    networks:
+      - frontend-net
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  # --- TẦNG GIÁM SÁT (PROMETHEUS & GRAFANA) ---
+  prometheus:
+    image: prom/prometheus
+    container_name: crm_prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring-net
+      - frontend-net
+      - backend-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    container_name: crm_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitoring-net
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: crm_cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - monitoring-net
+    restart: unless-stopped
+
+  # --- TẦNG QUẢN LÝ LOG (LOKI & PROMTAIL) ---
+  loki:
+    image: grafana/loki:latest
+    container_name: crm_loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+    networks:
+      - monitoring-net
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: crm_promtail
+    volumes:
+      - ./loki/promtail-config.yml:/etc/promtail/config.yml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - monitoring-net
+    depends_on:
+      - loki
+    restart: unless-stopped
